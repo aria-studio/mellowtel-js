@@ -74,7 +74,8 @@ export async function seeIfTriggersDownload(
   triggersDownload: boolean,
   recordID: string,
 ): Promise<string> {
-  return new Promise(function (res) {
+  return new Promise(async function (res) {
+    Logger.log("@@ seeIfTriggersDownload @@ =>", triggersDownload);
     if (!triggersDownload) {
       res("done");
     } else {
@@ -82,8 +83,37 @@ export async function seeIfTriggersDownload(
 
       const urlCondition = {
         resourceTypes: ["sub_frame" as ResourceType],
-        urlFilter: "*://*/*",
+        urlFilter: url,
       };
+
+      if (triggersDownload) {
+        rulesToApply.push({
+          id: RULE_ID_CONTENT_DISPOSITION,
+          priority: 1,
+          action: {
+            type: "modifyHeaders" as RuleActionType,
+            responseHeaders: [
+              {
+                header: "content-disposition",
+                operation: "remove" as HeaderOperation,
+              },
+            ],
+          },
+          condition: urlCondition,
+        });
+
+        try {
+          await chrome.declarativeNetRequest.updateSessionRules({
+            removeRuleIds: [RULE_ID_CONTENT_DISPOSITION],
+            addRules: rulesToApply,
+          });
+          await saveTriggerTimestamp();
+        } catch (error) {
+          Logger.error("Failed to update session rules:", error);
+          res("error");
+          return;
+        }
+      }
 
       fetchAndProcessHeaders(url)
         .then(async function (result: {
@@ -111,29 +141,8 @@ export async function seeIfTriggersDownload(
           if (result.error) {
             res("error");
           } else if (isOfficeDoc) {
-            res("done");
-          } else {
             // Handle content-disposition removal
             if (result.removeContentDisposition) {
-              rulesToApply.push({
-                id: RULE_ID_CONTENT_DISPOSITION,
-                priority: 1,
-                action: {
-                  type: "modifyHeaders" as RuleActionType,
-                  responseHeaders: [
-                    {
-                      header: "content-disposition",
-                      operation: "remove" as HeaderOperation,
-                    },
-                  ],
-                },
-                condition: urlCondition,
-              });
-            }
-
-            // Content type modification
-            if (result.modifyContentType && result.valueToModifyContentTypeTo) {
-              // First remove existing content-type
               rulesToApply.push({
                 id: RULE_ID_CONTENT_TYPE,
                 priority: 1,
@@ -149,46 +158,64 @@ export async function seeIfTriggersDownload(
                 condition: urlCondition,
               });
 
-              // Then set new content-type
-              rulesToApply.push({
-                id: RULE_ID_VALUE_TO_MODIFY_CONTENT_TYPE_TO,
-                priority: 2, // Highest priority to ensure it's applied last
-                action: {
-                  type: "modifyHeaders" as RuleActionType,
-                  responseHeaders: [
-                    {
-                      header: "content-type",
-                      operation: "set" as HeaderOperation,
-                      value: result.valueToModifyContentTypeTo,
-                    },
-                    // Add additional headers to prevent download
-                    {
-                      header: "x-content-type-options",
-                      operation: "set" as HeaderOperation,
-                      value: "nosniff",
-                    },
-                  ],
-                },
-                condition: urlCondition,
-              });
-            }
+              // Content type modification
+              if (result.modifyContentType && result.valueToModifyContentTypeTo) {
+                // First remove existing content-type
+                rulesToApply.push({
+                  id: RULE_ID_CONTENT_TYPE,
+                  priority: 1,
+                  action: {
+                    type: "modifyHeaders" as RuleActionType,
+                    responseHeaders: [
+                      {
+                        header: "content-type",
+                        operation: "remove" as HeaderOperation,
+                      },
+                    ],
+                  },
+                  condition: urlCondition,
+                });
 
-            // Update session rules
-            try {
-              await chrome.declarativeNetRequest.updateSessionRules({
-                removeRuleIds: [
-                  RULE_ID_CONTENT_DISPOSITION,
-                  RULE_ID_CONTENT_TYPE,
-                  RULE_ID_VALUE_TO_MODIFY_CONTENT_TYPE_TO,
-                ],
-                addRules: rulesToApply,
-              });
-              await saveTriggerTimestamp();
-              Logger.log("Updated session rules successfully:", rulesToApply);
-              res("done");
-            } catch (error) {
-              Logger.error("Failed to update session rules:", error);
-              res("error");
+                // Then set new content-type
+                rulesToApply.push({
+                  id: RULE_ID_VALUE_TO_MODIFY_CONTENT_TYPE_TO,
+                  priority: 2, // Highest priority to ensure it's applied last
+                  action: {
+                    type: "modifyHeaders" as RuleActionType,
+                    responseHeaders: [
+                      {
+                        header: "content-type",
+                        operation: "set" as HeaderOperation,
+                        value: result.valueToModifyContentTypeTo,
+                      },
+                      // Add additional headers to prevent download
+                      {
+                        header: "x-content-type-options",
+                        operation: "set" as HeaderOperation,
+                        value: "nosniff",
+                      },
+                    ],
+                  },
+                  condition: urlCondition,
+                });
+              }
+
+              // Update session rules
+              try {
+                await chrome.declarativeNetRequest.updateSessionRules({
+                  removeRuleIds: [
+                    RULE_ID_CONTENT_TYPE,
+                    RULE_ID_VALUE_TO_MODIFY_CONTENT_TYPE_TO,
+                  ],
+                  addRules: rulesToApply,
+                });
+                await saveTriggerTimestamp();
+                Logger.log("Updated session rules successfully:", rulesToApply);
+                res("done");
+              } catch (error) {
+                Logger.error("Failed to update session rules:", error);
+                res("error");
+              }
             }
           }
         })
@@ -259,6 +286,19 @@ async function fetchAndProcessHeaders(url: string) {
       ) {
         removeContentDisposition = true;
       }
+    }
+
+    if (removeContentDisposition) {
+      Logger.log("## Early return due to content-disposition  potentially causing download =>");
+      return {
+        error: false,
+        isPDF: isPDF,
+        isOfficeDoc: isOfficeDoc,
+        statusCode: statusCode,
+        removeContentDisposition: removeContentDisposition,
+        modifyContentType: modifyContentType,
+        valueToModifyContentTypeTo: valueToModifyContentTypeTo,
+      };
     }
 
     if (contentType) {
